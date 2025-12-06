@@ -15,6 +15,7 @@ class WclapHost {
 	ready;
 	hostInstance;
 	hostMemory;
+	shared;
 
 	#threadSpawnInstancePtr = null;
 	#hostThreadSpawnWASIT1(hostThreadContext) {
@@ -268,6 +269,7 @@ class WclapHost {
 			this.#wasi.bindToOtherMemory(this.hostMemory);
 			if (needsInit) this.hostInstance.exports._initialize();
 
+			this.shared = !!config.memory;
 			this.ready = true;
 			return this;
 		})();

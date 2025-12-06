@@ -274,9 +274,14 @@ namespace js_wasm {
 using Instance = wclap::Instance<js_wasm::WclapInstance>;
 
 extern "C" {
+	__attribute__((export_name("_wclapInstanceCreate")))
 	Instance * _wclapInstanceCreate(bool is64);
+	__attribute__((export_name("_wclapInstanceSetPath")))
 	char * _wclapInstanceSetPath(Instance *instance, size_t size);
+	__attribute__((export_name("_wclapInstanceGetNextIndex")))
 	uint32_t _wclapInstanceGetNextIndex();
+	__attribute__((export_name("_wclapNextThreadId")))
 	int32_t _wclapNextThreadId();
+	__attribute__((export_name("_wclapStartInstanceThread")))
 	int32_t _wclapStartInstanceThread(Instance *instance, uint64_t instanceThreadArg);
 }
