@@ -1,0 +1,3 @@
+[submodule "cpp/wclap-cpp"]
+	path = cpp/wclap-cpp
+	url = https://github.com/WebCLAP/wclap-cpp.git
