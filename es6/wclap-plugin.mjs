@@ -11,18 +11,55 @@ function fnv1aHex(string) {
 
 export default async function getWclap(options) {
 	if (typeof options === 'string') options = {url: options};
-	if (!options.files) options.files = {};
+	options = Object.assign({}, options);
 	if (!options.pluginPath) options.pluginPath = "/plugin/" + fnv1aHex(options.url);
-	if (options.module) return options;
+	if (options.module && options.module instanceof WebAssembly.Module) {
+		// Make a distinct copy of the memory (if it exists)
+		if (options.memory) options.memory = new WebAssembly.Memory(options.memorySpec);
+		// Distinct path suffix
+		options.pluginPath += "-copy-" + fnv1aHex(Date.now() + options.url + Math.random());
+		return options;
+	}
+
+	let prevFiles = options.files;
+	options.files = {};
+	if (prevFiles) {
+		for (let key in prevFiles) { // Add the WCLAP's path prefix
+			options.files[`${options.pluginPath}/${key}`] = prevFiles[key];
+		}
+	}
+
+	function guessMemorySize(bufferOrSize, module) {
+		let importsMemory = false;
+		WebAssembly.Module.imports(module).forEach(entry => {
+			if (entry.kind == 'memory') importsMemory = true;
+		});
+		if (!importsMemory) return;
+	
+		// We have to guess the imported memory size - as a heuristic, use the module size itself
+		if (ArrayBuffer.isView(bufferOrSize)) bufferOrSize = bufferOrSize.buffer;
+		let moduleSize = (typeof bufferOrSize == 'number' ? bufferOrSize : bufferOrSize.byteLength);
+		let modulePages = Math.max(Math.ceil(moduleSize/65536) || 4, 4);
+		options.memorySpec = {initial: modulePages, maximum: 32768, shared: true};
+		// If we're cross-origin isolated, actually create this memory
+		if (globalThis.crossOriginIsolated) options.memory = new WebAssembly.Memory(options.memorySpec);
+	}
 
 	let wasmPath = `${options.pluginPath}/module.wasm`;
+	options.module = options.module || options.files[wasmPath];
+	options.files[wasmPath] = new ArrayBuffer(0); // avoid self-parsing shenanigans
+
+	if (options.module && (options.module instanceof ArrayBuffer || ArrayBuffer.isView(options.module))) {
+		let buffer = options.module;
+		options.module = await WebAssembly.compile(buffer);
+		guessMemorySize(buffer, module);
+		return options;
+	}
+
 	let response = await fetch(options.url);
 	if (response.headers.get("Content-Type") == "application/wasm") {
-		options.moduleSize = response.headers.get('Content-Length') || (1<<24);;
 		options.module = await WebAssembly.compileStreaming(response);
-		options.files = {
-			[wasmPath]: new ArrayBuffer(0)
-		};
+		guessMemorySize(response.headers.get('Content-Length') || (1<<24), options.module);
 		return options;
 	}
 
@@ -45,7 +82,8 @@ export default async function getWclap(options) {
 		throw Error("No `module.wasm` found in WCLAP bundle");
 	}
 
-	options.moduleSize = options.files[wasmPath].byteLength;
 	options.module = await WebAssembly.compile(options.files[wasmPath]);
+	guessMemorySize(options.files[wasmPath], options.module);
+
 	return options;
 }

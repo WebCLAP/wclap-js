@@ -10,7 +10,6 @@ class WclapHost {
 	#wasi;
 	#wclapMap = Object.create(null);
 	#functionTable;
-	#createThreadWorker;
 	
 	ready;
 	hostInstance;
@@ -20,23 +19,24 @@ class WclapHost {
 	#threadSpawnInstancePtr = null;
 	#hostThreadSpawnWASIT1(hostThreadContext) {
 		let hostThreadId = this.hostInstance.exports._wclapNextThreadId();
-		if (!this.#createThreadWorker) {
-			console.error("Host does not support worker threads");
-			return -1;
-		}
 		let instancePtr = this.#threadSpawnInstancePtr;
 		this.#threadSpawnInstancePtr = null;
 		if (instancePtr == null) throw "Only instances can spawn threads (not the host)";
 		
 		let entry = this.#wclapMap[instancePtr];
 		if (!entry) throw Error("Starting thread from unknown Instance: " + instancePtr);
-		let createWorker = entry.createWorkerFn || this.#createThreadWorker;
+		let createWorker = entry.createWorkerFn;
+		if (!createWorker) {
+			console.error("WCLAP was not started with thread support");
+			return -1;
+		}
 
 		// The data passed here is minimal enough that it can always be cloned (even from a Worklet)
 		let created = createWorker(this, {
 			instancePtr: instancePtr,
 			threadId: hostThreadId,
-			threadContext: hostThreadContext
+			threadContext: hostThreadContext,
+			hostFunctions: entry.hostFunctions
 		});
 		if (!created) {
 			console.error("Host failed to create a WCLAP thread Worker");
@@ -50,15 +50,11 @@ class WclapHost {
 		// This call makes the host start a new thread, which will (synchronously) call #hostThreadSpawn above, and pick up the config
 		return this.hostInstance.exports._wclapStartInstanceThread(instancePtr, BigInt(threadArg));
 	}
-	getWorkerData(threadData) {
+	getWorkerData(wclapInit, threadData) {
 		if (!globalThis.crossOriginIsolated) {
 			throw Error("Trying to start thread from invalid context (not cross-origin isolated)");
 		}
-
-		let instancePtr = threadData.instancePtr;
-		let entry = this.#wclapMap[instancePtr];
-		if (!entry) throw Error("Starting thread from unknown Instance: " + instancePtr);
-		if (!entry.memory) {
+		if (!wclapInit.memory) {
 			console.error("Plugin attempted to start a new thread, but has no shared memory");
 			debugger;
 			return -1;
@@ -66,24 +62,28 @@ class WclapHost {
 
 		// This is what `runWorker()` actually needs
 		return {
+			instancePtr: threadData.instancePtr,
 			threadId: threadData.threadId,
 			threadContext: threadData.threadContext,
+			hostFunctions: threadData.hostFunctions,
 
 			host: this.initObj(),
-			wclap: entry.initObj,
-			initHostFunctions: entry.hostFunctions
+			wclap: wclapInit
 		};
 	}
 	static async runWorker(workerData, hostImports, createWorkerFn) {
 		let host = await startHost(workerData.host, hostImports);
-		let wclap = await host.startWclap(workerData.wclap, createWorkerFn);
-		let entry = host.#wclapMap[workerData.wclap.instancePtr];
+		let wclapInit = Object.assign({
+			instancePtr: workerData.instancePtr,
+			hostFunctions: workerData.hostFunctions,
+		}, workerData.wclap);
+		let wclap = await host.startWclap(wclapInit, createWorkerFn);
+		let entry = host.#wclapMap[wclapInit.instancePtr];
 		if (!entry) throw Error("Worker started, but `Instance *` isn't in the map");
 		host.hostInstance.exports.wasi_thread_start(workerData.threadId, workerData.threadContext);
 	}
 
-	constructor(config, hostImports, createWorkerFn) {
-		this.#createThreadWorker = createWorkerFn;
+	constructor(config, hostImports) {
 		if (!hostImports) hostImports = {};
 		// Methods which let the host manage the WCLAP in another module
 		let getEntry = instancePtr => {
@@ -281,31 +281,25 @@ class WclapHost {
 	
 	/// Returns an instance pointer (`Instance *`) for the C++ host.
 	async startWclap(wclapInitObj, createWorkerFn) {
-		if (!wclapInitObj.module) wclapInitObj = await getWclap(wclapInitObj);
-		wclapInitObj = Object.assign({}, wclapInitObj);
+		if (!wclapInitObj.module) throw Error('WCLAP init object must be from `getWclap()`');
 
 		let wclapImports = {};
 
 		let importMemory = wclapInitObj.memory;
-		let needsInit = !importMemory;
+		let needsInit = !('instancePtr' in wclapInitObj);
 		let needsWasi = false;
 		WebAssembly.Module.imports(wclapInitObj.module).forEach(entry => {
 			if (/^wasi/.test(entry.module)) needsWasi = true;
 			if (entry.kind == 'memory') {
 				if (!importMemory) {
-					// We have to guess the imported memory size - as a heuristic, use the module size itself
-					let modulePages = Math.max(Math.ceil(wclapInitObj.moduleSize/65536) || 4, 4);
-					importMemory = new WebAssembly.Memory({initial: modulePages, maximum: 32768, shared: true});
-					if (globalThis.crossOriginIsolated) wclapInitObj.memory = importMemory;
+					if (globalThis.crossOriginIsolated) throw Error('imported memory not supplied');
+					importMemory = new WebAssembly.Memory(wclapInitObj.memorySpec);
 				}
 				if (!wclapImports[entry.module]) wclapImports[entry.module] = {};
 				wclapImports[entry.module][entry.name] = importMemory;
 			}
 		});
 
-		if (needsInit && ('instancePtr' in wclapInitObj)) {
-			throw Error("WCLAP's initObj has instancePtr, but no shared-memory import - this is probably a bug in the host code, please report it");
-		}
 		let instancePtr = wclapInitObj.instancePtr;
 
 		let pluginWasi = null;
@@ -313,9 +307,9 @@ class WclapHost {
 			pluginWasi = await this.#wasi.copyForRebinding();
 			Object.assign(wclapImports, pluginWasi.importObj);
 
-			if (wclapInitObj.files) {
+			if (needsInit && wclapInitObj.files) {
 				pluginWasi.loadFiles(wclapInitObj.files);
-				delete wclapInitObj.files; // They'll now get passed around inside the WASI's memory, and we don't want to overwrite them
+				// TODO: delete these files, since they'll now get passed around inside the WASI's memory
 			}
 		}
 		// wasi-threads
@@ -360,23 +354,17 @@ class WclapHost {
 			let pathPtr = this.hostInstance.exports._wclapInstanceSetPath(instancePtr, pathBytes.length);
 			new Uint8Array(this.hostMemory.buffer).set(pathBytes, pathPtr);
 		} else {
+			if (!wclapInitObj.hostFunctions) throw Error("Starting WCLAP thread, but host functions not provided - did you use `host.getWorkerData()`?");
 			this.#assignHostFunctions(entry);
 			entry.hadInit = true;
 		}
 		let shared = !!wclapInitObj.memory;
-		if (shared) {
-			wclapInitObj.instancePtr = instancePtr;
-			wclapInitObj.hostFunctions = entry.hostFunctions;
-		}
 		this.#wclapMap[instancePtr] = entry;
 
 		return {
 			ptr: instancePtr,
 			memory: entry.memory,
-			shared: shared,
-			initObj: () => {
-				return Object.assign({}, wclapInitObj);
-			}
+			shared: shared
 		};
 	}
 	
@@ -407,9 +395,9 @@ class WclapHost {
 	}
 }
 
-async function startHost(initObj, hostImports, startWorkerFn) {
+async function startHost(initObj, hostImports) {
 	initObj = Object.assign({}, initObj);
-	return new WclapHost(initObj, hostImports, startWorkerFn).ready;
+	return new WclapHost(initObj, hostImports).ready;
 }
 
 async function getHost(initObj) {
