@@ -236,7 +236,7 @@ class WclapHost {
 			WebAssembly.Module.imports(config.module).forEach(entry => {
 				if (entry.kind == 'memory') {
 					if (!importMemory) {
-						importMemory = new WebAssembly.Memory({initial: 8, maximum: 32768, shared: true});
+						importMemory = new WebAssembly.Memory({initial: 2, maximum: 32768, shared: true});
 						if (globalThis.crossOriginIsolated) config.memory = importMemory;
 					}
 					
@@ -293,7 +293,9 @@ class WclapHost {
 			if (/^wasi/.test(entry.module)) needsWasi = true;
 			if (entry.kind == 'memory') {
 				if (!importMemory) {
-					importMemory = new WebAssembly.Memory({initial: 8, maximum: 32768, shared: true});
+					// We have to guess the imported memory size - as a heuristic, use the module size itself
+					let modulePages = Math.max(Math.ceil(wclapInitObj.moduleSize/65536) || 4, 4);
+					importMemory = new WebAssembly.Memory({initial: modulePages, maximum: 32768, shared: true});
 					if (globalThis.crossOriginIsolated) wclapInitObj.memory = importMemory;
 				}
 				if (!wclapImports[entry.module]) wclapImports[entry.module] = {};
@@ -310,6 +312,11 @@ class WclapHost {
 		if (needsWasi) {
 			pluginWasi = await this.#wasi.copyForRebinding();
 			Object.assign(wclapImports, pluginWasi.importObj);
+
+			if (wclapInitObj.files) {
+				pluginWasi.loadFiles(wclapInitObj.files);
+				delete wclapInitObj.files; // They'll now get passed around inside the WASI's memory, and we don't want to overwrite them
+			}
 		}
 		// wasi-threads
 		if (!wclapImports.wasi) wclapImports.wasi = {};
@@ -342,9 +349,6 @@ class WclapHost {
 		};
 		if (pluginWasi) {
 			pluginWasi.bindToOtherMemory(entry.memory);
-			if (wclapInitObj.files) {
-				console.log("TODO: load WCLAP files into WASI VFS");
-			}
 		}
 
 		if (needsInit) {
@@ -432,7 +436,7 @@ if (!globalThis.TextEncoder) {
 		return result;
 	};
 	TextCodec.prototype.decode = array => {
-		if (!ArrayBuffer.isView(array)) {
+		if (!(array instanceof ArrayBuffer) && !ArrayBuffer.isView(array)) {
 			throw Error('Can only use ArrayBuffer or view with TextDecoder');
 		}
 		array = new Uint8Array(array.buffer, array.byteOffset, array.byteLength);

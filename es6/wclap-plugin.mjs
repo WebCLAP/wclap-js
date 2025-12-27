@@ -18,6 +18,7 @@ export default async function getWclap(options) {
 	let wasmPath = `${options.pluginPath}/module.wasm`;
 	let response = await fetch(options.url);
 	if (response.headers.get("Content-Type") == "application/wasm") {
+		options.moduleSize = response.headers.get('Content-Length') || (1<<24);;
 		options.module = await WebAssembly.compileStreaming(response);
 		options.files = {
 			[wasmPath]: new ArrayBuffer(0)
@@ -44,6 +45,7 @@ export default async function getWclap(options) {
 		throw Error("No `module.wasm` found in WCLAP bundle");
 	}
 
+	options.moduleSize = options.files[wasmPath].byteLength;
 	options.module = await WebAssembly.compile(options.files[wasmPath]);
 	return options;
 }
