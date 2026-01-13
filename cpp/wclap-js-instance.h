@@ -5,6 +5,7 @@ Anything using this can be instantiated by `wclap-host.mjs`.  This provides the 
 #include "wclap/instance.hpp"
 #include <type_traits>
 #include <atomic>
+#include <iostream>
 
 // These are provided by `wclap-host.mjs`, and let us talk to another WebAssembly instance in the same JS context
 __attribute__((import_module("_wclapInstance"), import_name("runThread")))
